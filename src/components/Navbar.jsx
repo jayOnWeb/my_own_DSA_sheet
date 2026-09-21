@@ -126,7 +126,7 @@ export const Navbar = ({
               className="p-2 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700/60 transition-colors"
               title="Backup / Restore / Reset Progress"
             >
-              <DownloadUpload className="w-4 h-4" />
+              <Download className="w-4 h-4" />
             </button>
           </div>
 
