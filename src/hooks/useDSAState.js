@@ -15,67 +15,52 @@ const getYesterdayDateStr = () => {
   return d.toISOString().split('T')[0];
 };
 
+const safeGetItem = (key, fallback) => {
+  try {
+    const saved = localStorage.getItem(key);
+    return saved ? JSON.parse(saved) : fallback;
+  } catch (e) {
+    console.error(`Error reading ${key} from localStorage`, e);
+    return fallback;
+  }
+};
+
+const safeSetItem = (key, value) => {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch (e) {
+    console.error(`Error saving ${key} to localStorage`, e);
+  }
+};
+
 export const useDSAState = () => {
-  // Solved state: map of problemId => { completed: bool, solvedAt: string, note: string, starred: bool }
-  const [solvedState, setSolvedState] = useState(() => {
-    try {
-      const saved = localStorage.getItem(SOLVED_STORAGE_KEY);
-      return saved ? JSON.parse(saved) : {};
-    } catch (e) {
-      console.error('Error loading solved state from localStorage', e);
-      return {};
-    }
-  });
+  const [solvedState, setSolvedState] = useState(() => safeGetItem(SOLVED_STORAGE_KEY, {}));
 
-  // Streak state
-  const [streakState, setStreakState] = useState(() => {
-    try {
-      const saved = localStorage.getItem(STREAK_STORAGE_KEY);
-      return saved
-        ? JSON.parse(saved)
-        : {
-            currentStreak: 0,
-            maxStreak: 0,
-            lastActiveDate: null,
-            activityHistory: {}
-          };
-    } catch (e) {
-      console.error('Error loading streak state', e);
-      return { currentStreak: 0, maxStreak: 0, lastActiveDate: null, activityHistory: {} };
-    }
-  });
+  const [streakState, setStreakState] = useState(() =>
+    safeGetItem(STREAK_STORAGE_KEY, {
+      currentStreak: 0,
+      maxStreak: 0,
+      lastActiveDate: null,
+      activityHistory: {}
+    })
+  );
 
-  // Save to localStorage
+  // Sync state across browser tabs
   useEffect(() => {
-    try {
-      localStorage.setItem(SOLVED_STORAGE_KEY, JSON.stringify(solvedState));
-    } catch (e) {
-      console.error('Failed to save solvedState', e);
-    }
-  }, [solvedState]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(STREAK_STORAGE_KEY, JSON.stringify(streakState));
-    } catch (e) {
-      console.error('Failed to save streakState', e);
-    }
-  }, [streakState]);
-
-  // Recalculate active streak on load (e.g. check if streak reset due to missed day)
-  useEffect(() => {
-    const today = getTodayDateStr();
-    const yesterday = getYesterdayDateStr();
-    
-    if (streakState.lastActiveDate) {
-      if (streakState.lastActiveDate !== today && streakState.lastActiveDate !== yesterday) {
-        // Streak broken
-        setStreakState(prev => ({
-          ...prev,
-          currentStreak: 0
-        }));
+    const handleStorageChange = (e) => {
+      if (e.key === SOLVED_STORAGE_KEY && e.newValue) {
+        try {
+          setSolvedState(JSON.parse(e.newValue));
+        } catch (err) {}
       }
-    }
+      if (e.key === STREAK_STORAGE_KEY && e.newValue) {
+        try {
+          setStreakState(JSON.parse(e.newValue));
+        } catch (err) {}
+      }
+    };
+    window.addEventListener('storage', handleStorageChange);
+    return () => window.removeEventListener('storage', handleStorageChange);
   }, []);
 
   const triggerConfetti = () => {
@@ -85,96 +70,110 @@ export const useDSAState = () => {
         spread: 70,
         origin: { y: 0.7 }
       });
-    } catch (e) {
-      // ignore
-    }
+    } catch (e) {}
   };
 
   const toggleProblemSolved = useCallback((problemId) => {
+    const key = String(problemId);
     const today = getTodayDateStr();
     const yesterday = getYesterdayDateStr();
 
-    setSolvedState(prev => {
-      const current = prev[problemId];
-      const isCurrentlyCompleted = current && current.completed;
-      const willBeCompleted = !isCurrentlyCompleted;
+    let wasCompleted = false;
 
-      const nextState = {
+    setSolvedState((prev) => {
+      const current = prev[key] || prev[problemId] || {};
+      const isCurrentlyCompleted = !!current.completed;
+      const willBeCompleted = !isCurrentlyCompleted;
+      wasCompleted = willBeCompleted;
+
+      const nextSolved = {
         ...prev,
-        [problemId]: {
-          ...(current || {}),
+        [key]: {
+          ...current,
           completed: willBeCompleted,
-          solvedAt: willBeCompleted ? today : (current?.solvedAt || null)
+          solvedAt: willBeCompleted ? today : (current.solvedAt || null)
         }
       };
 
-      if (willBeCompleted) {
-        triggerConfetti();
-
-        // Update streak
-        setStreakState(prevStreak => {
-          let newStreak = prevStreak.currentStreak;
-          const lastActive = prevStreak.lastActiveDate;
-
-          if (lastActive === today) {
-            // Already active today, streak count remains same
-          } else if (lastActive === yesterday) {
-            // Continued streak from yesterday!
-            newStreak += 1;
-          } else {
-            // Fresh streak start
-            newStreak = 1;
-          }
-
-          const newMax = Math.max(prevStreak.maxStreak, newStreak);
-          const history = { ...prevStreak.activityHistory };
-          history[today] = (history[today] || 0) + 1;
-
-          return {
-            currentStreak: newStreak,
-            maxStreak: newMax,
-            lastActiveDate: today,
-            activityHistory: history
-          };
-        });
-      }
-
-      return nextState;
+      // Direct synchronous write to localStorage for instant persistence
+      safeSetItem(SOLVED_STORAGE_KEY, nextSolved);
+      return nextSolved;
     });
+
+    if (wasCompleted) {
+      triggerConfetti();
+
+      setStreakState((prevStreak) => {
+        let newStreak = prevStreak.currentStreak || 0;
+        const lastActive = prevStreak.lastActiveDate;
+
+        if (lastActive === today) {
+          // Already active today
+        } else if (lastActive === yesterday) {
+          newStreak += 1;
+        } else {
+          newStreak = 1;
+        }
+
+        const newMax = Math.max(prevStreak.maxStreak || 0, newStreak);
+        const history = { ...(prevStreak.activityHistory || {}) };
+        history[today] = (history[today] || 0) + 1;
+
+        const nextStreak = {
+          currentStreak: newStreak,
+          maxStreak: newMax,
+          lastActiveDate: today,
+          activityHistory: history
+        };
+
+        safeSetItem(STREAK_STORAGE_KEY, nextStreak);
+        return nextStreak;
+      });
+    }
   }, []);
 
   const toggleStarProblem = useCallback((problemId) => {
-    setSolvedState(prev => {
-      const current = prev[problemId] || {};
-      return {
+    const key = String(problemId);
+    setSolvedState((prev) => {
+      const current = prev[key] || prev[problemId] || {};
+      const nextSolved = {
         ...prev,
-        [problemId]: {
+        [key]: {
           ...current,
           starred: !current.starred
         }
       };
+      safeSetItem(SOLVED_STORAGE_KEY, nextSolved);
+      return nextSolved;
     });
   }, []);
 
   const saveProblemNote = useCallback((problemId, noteText) => {
-    setSolvedState(prev => {
-      const current = prev[problemId] || {};
-      return {
+    const key = String(problemId);
+    setSolvedState((prev) => {
+      const current = prev[key] || prev[problemId] || {};
+      const nextSolved = {
         ...prev,
-        [problemId]: {
+        [key]: {
           ...current,
           note: noteText
         }
       };
+      safeSetItem(SOLVED_STORAGE_KEY, nextSolved);
+      return nextSolved;
     });
   }, []);
 
   const resetAllProgress = useCallback(() => {
     if (window.confirm('Are you sure you want to reset all your progress and streak?')) {
-      setSolvedState({});
-      setStreakState({ currentStreak: 0, maxStreak: 0, lastActiveDate: null, activityHistory: {} });
-      localStorage.removeItem(SOLVED_STORAGE_KEY);
-      localStorage.removeItem(STREAK_STORAGE_KEY);
+      const emptySolved = {};
+      const emptyStreak = { currentStreak: 0, maxStreak: 0, lastActiveDate: null, activityHistory: {} };
+
+      setSolvedState(emptySolved);
+      setStreakState(emptyStreak);
+
+      safeSetItem(SOLVED_STORAGE_KEY, emptySolved);
+      safeSetItem(STREAK_STORAGE_KEY, emptyStreak);
     }
   }, []);
 
@@ -199,9 +198,11 @@ export const useDSAState = () => {
       const parsed = JSON.parse(jsonString);
       if (parsed.solvedState) {
         setSolvedState(parsed.solvedState);
+        safeSetItem(SOLVED_STORAGE_KEY, parsed.solvedState);
       }
       if (parsed.streakState) {
         setStreakState(parsed.streakState);
+        safeSetItem(STREAK_STORAGE_KEY, parsed.streakState);
       }
       alert('Progress imported successfully!');
     } catch (e) {
